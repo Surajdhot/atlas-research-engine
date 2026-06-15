@@ -1,7 +1,9 @@
 """Central configuration: environment loading, constants, and validation.
 
 All tunable constants and secret loading live here so logic modules never
-hardcode values or read environment variables directly.
+hardcode values or read environment variables directly. The LLM provider is
+any OpenAI-compatible endpoint (Groq, Ollama, Google Gemini, ...) chosen via
+LLM_BASE_URL / LLM_API_KEY / MODEL.
 """
 from __future__ import annotations
 
@@ -30,8 +32,9 @@ CONFLICT_PENALTY: float = 0.3
 CONFIDENCE_GREEN: float = 0.7
 CONFIDENCE_AMBER: float = 0.4
 
-# --- LLM constants ---------------------------------------------------------
-MODEL: str = os.getenv("MODEL", "claude-fable-5")
+# --- LLM constants (OpenAI-compatible: Groq / Ollama / Gemini / ...) -------
+MODEL: str = os.getenv("MODEL", "llama-3.3-70b-versatile")
+LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 MAX_TOKENS: int = 8000
 MAX_TOOL_ITERATIONS: int = 6
 # Backoff schedule (seconds) for the three LLM retry attempts.
@@ -42,7 +45,7 @@ RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 529})
 HTTP_TIMEOUT: float = 20.0
 
 # --- Secrets / runtime settings (from .env) -------------------------------
-ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
 TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -66,15 +69,16 @@ def validate_config() -> None:
         ConfigError: If a required variable is missing, naming each one.
     """
     missing: list[str] = []
-    if not ANTHROPIC_API_KEY:
-        missing.append("ANTHROPIC_API_KEY")
+    if not LLM_API_KEY:
+        missing.append("LLM_API_KEY")
     if not TAVILY_API_KEY:
         missing.append("TAVILY_API_KEY")
     if missing:
         raise ConfigError(
             "Missing required environment variables: "
             + ", ".join(missing)
-            + ". Copy .env.example to .env and fill in the values."
+            + ". Copy .env.example to .env and fill in the values "
+            "(for local Ollama, set LLM_API_KEY to any placeholder)."
         )
 
 

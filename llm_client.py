@@ -1,10 +1,10 @@
-"""All Claude (Anthropic) API access for Atlas lives here.
+"""All large-language-model access for Atlas lives here.
 
-This is the only module that talks to the Anthropic SDK. It exposes a tool-use
-loop for agentic retrieval and a structured-output helper for planning and
-synthesis, both wrapped in retry/backoff. The model is read from config and is
-called with the parameters supported by ``claude-fable-5`` (no ``thinking`` or
-sampling parameters, which that model rejects).
+This is the only module that talks to an LLM provider. It uses the OpenAI
+Python SDK against any OpenAI-compatible endpoint (Groq, Ollama, Google Gemini,
+etc.), chosen entirely through configuration. It exposes a tool-use loop for
+agentic retrieval and a structured-output helper for planning and synthesis,
+both wrapped in retry/backoff.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-import anthropic
+import openai
+from openai import AsyncOpenAI
 
 import config
 
@@ -25,7 +26,7 @@ ToolHandler = Callable[[dict[str, Any]], Awaitable[str]]
 
 @dataclass
 class ToolSpec:
-    """An Anthropic tool definition bound to an async handler that executes it."""
+    """A tool definition bound to an async handler that executes it."""
 
     name: str
     description: str
@@ -34,17 +35,23 @@ class ToolSpec:
 
 
 class LLMClient:
-    """Async wrapper around the Anthropic Messages API used by every agent."""
+    """Async wrapper around an OpenAI-compatible chat API used by every agent."""
 
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
-        """Create the async Anthropic client from configuration."""
-        self._client = anthropic.AsyncAnthropic(
-            api_key=api_key or config.ANTHROPIC_API_KEY
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Create the async client from configuration (provider-agnostic)."""
+        self._client = AsyncOpenAI(
+            api_key=api_key or config.LLM_API_KEY or "not-needed",
+            base_url=base_url or config.LLM_BASE_URL,
         )
         self._model = model or config.MODEL
 
     async def _create(self, **kwargs: Any) -> Any:
-        """Call messages.create with retry and exponential backoff.
+        """Call chat.completions.create with retry and exponential backoff.
 
         Retries retryable API errors with waits of 2s/4s/8s between attempts.
         Non-retryable errors (e.g. bad request, auth) propagate immediately.
@@ -54,17 +61,17 @@ class LLMClient:
             if delay:
                 await asyncio.sleep(delay)
             try:
-                return await self._client.messages.create(
+                return await self._client.chat.completions.create(
                     model=self._model, max_tokens=config.MAX_TOKENS, **kwargs
                 )
-            except anthropic.APIConnectionError as exc:
+            except openai.APIConnectionError as exc:
                 last_exc = exc
-                logger.warning("Anthropic connection error; will retry: %s", exc)
-            except anthropic.APIStatusError as exc:
+                logger.warning("LLM connection error; will retry: %s", exc)
+            except openai.APIStatusError as exc:
                 if exc.status_code not in config.RETRYABLE_STATUS_CODES:
                     raise
                 last_exc = exc
-                logger.warning("Anthropic HTTP %s; will retry.", exc.status_code)
+                logger.warning("LLM HTTP %s; will retry.", exc.status_code)
         assert last_exc is not None  # the loop always assigns before exhausting
         raise last_exc
 
@@ -76,65 +83,93 @@ class LLMClient:
         The model may call any provided tool repeatedly; each call is executed
         via its handler and the result fed back. Returns the final text answer.
         """
-        api_tools = [
-            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
-            for t in tools
-        ]
+        api_tools = [_to_openai_tool(t) for t in tools]
         handlers = {t.name: t.handler for t in tools}
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
         for _ in range(config.MAX_TOOL_ITERATIONS):
             response = await self._create(
-                system=system_prompt, messages=messages, tools=api_tools
+                messages=messages, tools=api_tools, tool_choice="auto"
             )
-            if response.stop_reason == "refusal":
-                logger.warning("Model refused the tool-use request.")
-                break
-            messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason != "tool_use":
-                return _extract_text(response.content)
-            tool_results = await self._run_tool_calls(response.content, handlers)
-            messages.append({"role": "user", "content": tool_results})
+            message = response.choices[0].message
+            messages.append(_assistant_message(message))
+            if not message.tool_calls:
+                return (message.content or "").strip()
+            for call in message.tool_calls:
+                result = await _dispatch(call, handlers)
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": result}
+                )
         logger.info("Tool-use loop ended without a final text answer.")
         return ""
-
-    async def _run_tool_calls(
-        self, content: list[Any], handlers: dict[str, ToolHandler]
-    ) -> list[dict[str, Any]]:
-        """Execute every tool_use block and collect matching tool_result blocks."""
-        results: list[dict[str, Any]] = []
-        for block in content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
-            text, is_error = await _safe_handle(
-                handlers.get(block.name), block.name, block.input
-            )
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": text,
-                    "is_error": is_error,
-                }
-            )
-        return results
 
     async def call_structured(
         self, system_prompt: str, user_message: str, response_schema: dict[str, Any]
     ) -> dict[str, Any]:
         """Call the model and return JSON parsed against the given schema.
 
-        Uses Anthropic structured outputs to constrain the response. Returns an
-        empty dict if the model refuses or returns no parseable JSON.
+        Requests JSON-object output and embeds the schema in the prompt. Returns
+        an empty dict if the model returns no parseable JSON.
         """
-        response = await self._create(
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-            output_config={"format": {"type": "json_schema", "schema": response_schema}},
+        instruction = (
+            "Respond with a single json object that matches this schema. "
+            "Output only json — no prose and no markdown fences:\n"
+            + json.dumps(response_schema)
         )
-        if response.stop_reason == "refusal":
-            logger.warning("Model refused the structured request.")
-            return {}
-        return _parse_json(_extract_text(response.content))
+        response = await self._create(
+            messages=[
+                {"role": "system", "content": f"{system_prompt}\n\n{instruction}"},
+                {"role": "user", "content": user_message},
+            ],
+            response_format={"type": "json_object"},
+        )
+        return _parse_json(response.choices[0].message.content or "")
+
+
+def _to_openai_tool(tool: ToolSpec) -> dict[str, Any]:
+    """Convert a ToolSpec into an OpenAI function-tool definition."""
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+        },
+    }
+
+
+def _assistant_message(message: Any) -> dict[str, Any]:
+    """Rebuild an assistant message dict (with any tool calls) for the history."""
+    payload: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
+    if message.tool_calls:
+        payload["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.function.name,
+                    "arguments": call.function.arguments,
+                },
+            }
+            for call in message.tool_calls
+        ]
+    return payload
+
+
+async def _dispatch(call: Any, handlers: dict[str, ToolHandler]) -> str:
+    """Parse a tool call's arguments and execute the matching handler."""
+    try:
+        args = json.loads(call.function.arguments or "{}")
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    text, _is_error = await _safe_handle(
+        handlers.get(call.function.name), call.function.name, args
+    )
+    return text
 
 
 async def _safe_handle(
@@ -150,16 +185,9 @@ async def _safe_handle(
         return f"Tool '{name}' failed: {exc}", True
 
 
-def _extract_text(content: list[Any]) -> str:
-    """Concatenate all text blocks from a response content list."""
-    parts = [
-        block.text for block in content if getattr(block, "type", None) == "text"
-    ]
-    return "\n".join(parts).strip()
-
-
 def _parse_json(text: str) -> dict[str, Any]:
     """Parse JSON from model text, tolerating surrounding prose or code fences."""
+    text = text.strip()
     if not text:
         return {}
     try:
