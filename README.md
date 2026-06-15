@@ -7,9 +7,9 @@ agents** gather evidence from the web, Wikipedia, and arXiv *in parallel*, and a
 score for every claim — explicitly flagging contradictions between sources
 rather than hiding them.
 
-It is built from scratch on the raw **Anthropic SDK** with tool use — no
-LangChain, no CrewAI — to demonstrate multi-agent orchestration without a
-framework.
+It is built from scratch on a raw **OpenAI-compatible LLM API** with tool use —
+no LangChain, no CrewAI — and runs on free backends (Groq, Ollama, or Google
+Gemini), selected via `.env`.
 
 ## How it works
 
@@ -22,7 +22,7 @@ framework.
         ▼              ▼              ▼
   ┌──────────┐   ┌──────────┐   ┌──────────┐
   │Retrieval │   │Retrieval │   │Retrieval │   each agent decides which
-  │  agent   │   │  agent   │   │  agent   │   sources to use via Claude
+  │  agent   │   │  agent   │   │  agent   │   sources to use via the model
   └────┬─────┘   └────┬─────┘   └────┬─────┘   tool-use (web/wiki/arxiv)
        └──────────────┼──────────────┘
                       ▼
@@ -77,12 +77,13 @@ cp .env.example .env              # then fill in your keys
 
 ### Environment variables
 
-| Variable            | Required | Description                                   |
-| ------------------- | -------- | --------------------------------------------- |
-| `ANTHROPIC_API_KEY` | yes      | Anthropic API key for the agents.             |
-| `TAVILY_API_KEY`    | yes      | [Tavily](https://tavily.com) key for web search. |
-| `MODEL`             | no       | Claude model id (default `claude-fable-5`).   |
-| `LOG_LEVEL`         | no       | Logging level (default `INFO`).               |
+| Variable         | Required | Description                                                     |
+| ---------------- | -------- | --------------------------------------------------------------- |
+| `LLM_BASE_URL`   | no       | OpenAI-compatible endpoint (default is Groq).                   |
+| `LLM_API_KEY`    | yes      | Key for the chosen provider (any placeholder for local Ollama). |
+| `MODEL`          | no       | Model id (default `llama-3.3-70b-versatile`).                   |
+| `TAVILY_API_KEY` | yes      | [Tavily](https://tavily.com) key for web search.                |
+| `LOG_LEVEL`      | no       | Logging level (default `INFO`).                                 |
 
 Wikipedia and arXiv need no API key.
 
@@ -119,10 +120,11 @@ handling and confidence averaging, and that retrieval genuinely runs in parallel
 
 ## Design notes
 
-- **No framework.** The multi-agent system is built directly on the Anthropic
-  SDK with tool use. Each agent is its own class under `agents/`.
-- **All Claude calls are isolated** in `llm_client.py`; every other module stays
-  provider-agnostic.
+- **No framework.** The multi-agent system is built directly on an
+  OpenAI-compatible LLM SDK with tool use. Each agent is its own class under
+  `agents/`.
+- **All LLM calls are isolated** in `llm_client.py`; every other module stays
+  provider-agnostic — swapping models or providers is a one-file `.env` change.
 - **Prompts live in `prompts/`** as plain text, never hardcoded in Python.
 - **Async throughout** — every agent and API call is `async`, enabling the
   concurrent retrieval fan-out.

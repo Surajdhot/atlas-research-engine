@@ -19,7 +19,7 @@ between sources rather than hiding them.
 
 ## Architecture decisions — do not change these
 - Each agent is its own class in the agents/ directory.
-- All LLM (Claude) calls live in llm_client.py only.
+- All LLM calls live in llm_client.py only.
 - Each external data source has its own tool module in tools/
   (web_search.py, wikipedia.py, arxiv.py).
 - All prompts live in prompts/ as .txt files — never hardcoded in Python.
@@ -28,8 +28,8 @@ between sources rather than hiding them.
 
 ## What NOT to do
 - Do not use LangChain or CrewAI — build the multi-agent system from scratch
-  using the raw Anthropic SDK with tool use. This is deliberate: I want to
-  demonstrate I understand agent orchestration without a framework.
+  using a raw OpenAI-compatible LLM SDK with tool use. This is deliberate: I want
+  to demonstrate I understand agent orchestration without a framework.
 - Do not create a heavy frontend — a simple Streamlit UI is the only UI.
 - Do not write placeholder, stub, or TODO code — everything must work.
 - Do not commit .env — only .env.example.
